@@ -1,0 +1,589 @@
+# --- Comparison Processor for Multiple Datasets ---
+class CFDComparisonProcessor:
+    def __init__(self, file_paths, labels=None):
+        """
+        file_paths: list of dataset file paths
+        labels: optional list of labels for each dataset
+        """
+        self.processors = [CFDPostProcessor(fp) for fp in file_paths]
+        self.labels = labels if labels is not None else [f'Dataset {i}' for i in range(len(file_paths))]
+
+    def compare_bar(self, field, agg_func='mean', save_path=None):
+        import matplotlib.pyplot as plt
+        """
+        Bar chart comparing aggregated field values across datasets.
+        """
+        import matplotlib.pyplot as plt
+        values = []
+        for proc in self.processors:
+            mesh = proc.mesh
+            if field in mesh.point_data:
+                data = mesh.point_data[field]
+                if agg_func == 'mean':
+                    val = np.mean(data)
+                elif agg_func == 'sum':
+                    val = np.sum(data)
+                else:
+                    val = np.mean(data)
+                values.append(val)
+            else:
+                values.append(np.nan)
+        import matplotlib.pyplot as plt
+        plt.figure()
+        plt.bar(self.labels, values)
+        plt.ylabel(field)
+        plt.title(f'Comparison Bar Chart: {field} ({agg_func})')
+        fname = save_path or f'compare_bar_{field}_{agg_func}.png'
+        plt.savefig(fname)
+        plt.close()
+
+    def compare_line(self, field, x_axis, combine_func='mean', save_path=None):
+        import matplotlib.pyplot as plt
+        """
+        Overlay line plots for field vs x_axis across datasets.
+        """
+        import matplotlib.pyplot as plt
+        plt.figure()
+        for proc, label in zip(self.processors, self.labels):
+            mesh = proc.mesh
+            if field in mesh.point_data and x_axis in mesh.point_data:
+                x = mesh.point_data[x_axis]
+                y = mesh.point_data[field]
+                # Optionally bin and aggregate
+                df = pd.DataFrame({x_axis: x, field: y})
+                grouped = df.groupby(x_axis)[field]
+                if combine_func == 'mean':
+                    y_combined = grouped.mean()
+                elif combine_func == 'sum':
+                    y_combined = grouped.sum()
+                else:
+                    y_combined = grouped.mean()
+                plt.plot(y_combined.index, y_combined.values, label=label)
+        plt.xlabel(x_axis)
+        plt.ylabel(field)
+        plt.title(f'Comparison Line Plot: {field} vs {x_axis}')
+        plt.legend()
+        fname = save_path or f'compare_line_{field}_vs_{x_axis}.png'
+        plt.savefig(fname)
+        plt.close()
+
+    def compare_scatter(self, field_x, field_y, save_path=None):
+        import matplotlib.pyplot as plt
+        """
+        Overlay scatter plots for field_y vs field_x across datasets.
+        """
+        import matplotlib.pyplot as plt
+        plt.figure()
+        for proc, label in zip(self.processors, self.labels):
+            mesh = proc.mesh
+            if field_x in mesh.point_data and field_y in mesh.point_data:
+                plt.scatter(mesh.point_data[field_x], mesh.point_data[field_y], label=label, alpha=0.6)
+        plt.xlabel(field_x)
+        plt.ylabel(field_y)
+        plt.title(f'Comparison Scatter Plot: {field_y} vs {field_x}')
+        plt.legend()
+        fname = save_path or f'compare_scatter_{field_y}_vs_{field_x}.png'
+        plt.savefig(fname)
+        plt.close()
+
+    def get_processor(self, idx):
+        """
+        Access individual CFDPostProcessor by index.
+        """
+        return self.processors[idx]
+
+import pyvista as pv
+import numpy as np
+import pandas as pd
+
+class CFDPostProcessor:
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.dataset = pv.read(file_path)
+        if isinstance(self.dataset, pv.MultiBlock):
+            self.mesh = self.dataset.combine()
+        else:
+            self.mesh = self.dataset
+
+    def slice_and_average(self, axis='y', num_slices=100):
+        bounds = self.mesh.bounds
+        axis_index = {'x': 0, 'y': 2, 'z': 4}[axis]
+        min_val = bounds[axis_index]
+        max_val = bounds[axis_index + 1]
+        y_range = max_val - min_val
+        slice_thickness = y_range / num_slices
+        results = []
+        for i in range(num_slices):
+            lower = min_val + i * slice_thickness
+            upper = lower + slice_thickness
+            mid = (lower + upper) / 2
+            box_bounds = list(bounds)
+            box_bounds[axis_index] = lower
+            box_bounds[axis_index + 1] = upper
+            sliced = self.mesh.clip_box(bounds=tuple(box_bounds), invert=False)
+            if sliced.n_points > 0 and sliced.point_data:
+                averages = {}
+                for name in sliced.point_data:
+                    data_array = sliced.point_data[name]
+                    if data_array.size > 0:
+                        averages[name] = np.mean(data_array)
+                averages[f'{axis}_min'] = lower
+                averages[f'{axis}_max'] = upper
+                averages[f'{axis}_mid'] = mid
+                averages[f'{axis}_min_norm'] = (lower - min_val) / y_range
+                averages[f'{axis}_max_norm'] = (upper - min_val) / y_range
+                averages[f'{axis}_mid_norm'] = (mid - min_val) / y_range
+                results.append(averages)
+        df = pd.DataFrame(results)
+        return df
+
+    def save_averages(self, df, output_csv):
+        df.to_csv(output_csv, index=False)
+        print(f"Saved: {output_csv}")
+
+    def plot_contour(self, block_indices=None, field=None, n_contours=10, save_path=None, data_type='cell'):
+        """
+        Plot contour(s) for the specified field. If block_indices is provided and the dataset is MultiBlock, plot only those blocks.
+        """
+        import matplotlib.pyplot as plt
+
+        if isinstance(self.dataset, pv.MultiBlock) and block_indices is not None:
+            blocks = [self.dataset[i] for i in block_indices if self.dataset[i] is not None]
+            plotter = pv.Plotter()
+            for block in blocks:
+                data_dict = block.cell_data if data_type == 'cell' else block.point_data
+                if field and field in data_dict:
+                    contours = block.contour(n_contours=n_contours, scalars=field)
+                    plotter.add_mesh(contours, scalars=field, cmap='viridis')
+                else:
+                    plotter.add_mesh(block)
+            if save_path:
+                plotter.show(screenshot=save_path)
+            else:
+                plotter.show()
+        else:
+            mesh = self.mesh
+            plotter = pv.Plotter()
+            data_dict = mesh.cell_data if data_type == 'cell' else mesh.point_data
+            if field and field in data_dict:
+                contours = mesh.contour(n_contours=n_contours, scalars=field)
+                plotter.add_mesh(contours, scalars=field, cmap='viridis')
+            else:
+                plotter.add_mesh(mesh)
+            if save_path:
+                plotter.show(screenshot=save_path)
+            else:
+                plotter.show()
+
+    def plot_line(self, field, x_axis, mode='separate', block_indices=None, combine_func='mean', save_path=None, data_type='cell'):
+        """
+        Plot line(s) for the specified field vs x_axis.
+        mode: 'separate' (one plot per block), 'overlay' (all blocks on one plot), 'combined' (aggregate values)
+        block_indices: list of block indices to plot (for MultiBlock)
+        combine_func: aggregation function for 'combined' mode ('mean', 'sum')
+        """
+        import matplotlib.pyplot as plt
+        if isinstance(self.dataset, pv.MultiBlock):
+            blocks = [self.dataset[i] for i in (block_indices if block_indices is not None else range(len(self.dataset))) if self.dataset[i] is not None]
+        else:
+            blocks = [self.mesh]
+
+        if mode == 'separate':
+            for idx, block in enumerate(blocks):
+                data_dict = block.cell_data if data_type == 'cell' else block.point_data
+                if field in data_dict and x_axis in data_dict:
+                    plt.figure()
+                    plt.plot(data_dict[x_axis], data_dict[field], label=f'Block {idx}')
+                    plt.xlabel(x_axis)
+                    plt.ylabel(field)
+                    plt.title(f'Block {idx}: {field} vs {x_axis}')
+                    plt.legend()
+                    fname = save_path or f'lineplot_block{idx}_{field}_vs_{x_axis}.png'
+                    plt.savefig(fname)
+                    plt.close()
+        elif mode == 'overlay':
+            plt.figure()
+            for idx, block in enumerate(blocks):
+                data_dict = block.cell_data if data_type == 'cell' else block.point_data
+                if field in data_dict and x_axis in data_dict:
+                    plt.plot(data_dict[x_axis], data_dict[field], label=f'Block {idx}')
+            plt.xlabel(x_axis)
+            plt.ylabel(field)
+            plt.title(f'Overlay: {field} vs {x_axis}')
+            plt.legend()
+            fname = save_path or f'lineplot_overlay_{field}_vs_{x_axis}.png'
+            plt.savefig(fname)
+            plt.close()
+        elif mode == 'combined':
+            # Aggregate values by x_axis
+            all_x = []
+            all_y = []
+            for block in blocks:
+                data_dict = block.cell_data if data_type == 'cell' else block.point_data
+                if field in data_dict and x_axis in data_dict:
+                    all_x.append(data_dict[x_axis])
+                    all_y.append(data_dict[field])
+            if all_x and all_y:
+                x_concat = np.concatenate(all_x)
+                y_concat = np.concatenate(all_y)
+                # Bin by x_axis
+                df = pd.DataFrame({x_axis: x_concat, field: y_concat})
+                grouped = df.groupby(x_axis)[field]
+                if combine_func == 'mean':
+                    y_combined = grouped.mean()
+                elif combine_func == 'sum':
+                    y_combined = grouped.sum()
+                else:
+                    y_combined = grouped.mean()
+                plt.figure()
+                plt.plot(y_combined.index, y_combined.values, label=f'Combined ({combine_func})')
+                plt.xlabel(x_axis)
+                plt.ylabel(field)
+                plt.title(f'Combined: {field} vs {x_axis}')
+                plt.legend()
+                fname = save_path or f'lineplot_combined_{field}_vs_{x_axis}.png'
+                plt.savefig(fname)
+                plt.close()
+
+    def plot_bar(self, field, agg_func='mean', block_indices=None, combined=False, save_path=None, data_type='cell'):
+        """
+        Plot bar chart for the specified field.
+        agg_func: aggregation function ('mean', 'sum', etc.)
+        block_indices: list of block indices to plot (for MultiBlock)
+        combined: if True, aggregate across all blocks
+        """
+        import matplotlib.pyplot as plt
+        values = []
+        labels = []
+        if isinstance(self.dataset, pv.MultiBlock):
+            blocks = [self.dataset[i] for i in (block_indices if block_indices is not None else range(len(self.dataset))) if self.dataset[i] is not None]
+        else:
+            blocks = [self.mesh]
+
+        if combined:
+            all_data = []
+            for block in blocks:
+                data_dict = block.cell_data if data_type == 'cell' else block.point_data
+                if field in data_dict:
+                    all_data.append(data_dict[field])
+            if all_data:
+                concat = np.concatenate(all_data)
+                if agg_func == 'mean':
+                    val = np.mean(concat)
+                elif agg_func == 'sum':
+                    val = np.sum(concat)
+                else:
+                    val = np.mean(concat)
+                values.append(val)
+                labels.append(f'Combined ({agg_func})')
+        else:
+            for idx, block in enumerate(blocks):
+                data_dict = block.cell_data if data_type == 'cell' else block.point_data
+                if field in data_dict:
+                    data = data_dict[field]
+                    if agg_func == 'mean':
+                        val = np.mean(data)
+                    elif agg_func == 'sum':
+                        val = np.sum(data)
+                    else:
+                        val = np.mean(data)
+                    values.append(val)
+                    labels.append(f'Block {idx}')
+        plt.figure()
+        plt.bar(labels, values)
+        plt.ylabel(field)
+        plt.title(f'Bar Chart: {field} ({agg_func})')
+        fname = save_path or f'barplot_{field}_{agg_func}.png'
+        plt.savefig(fname)
+        plt.close()
+
+    def plot_block_percentage_bar(self, field, block_indices=None, save_path=None):
+        """
+        Plot bar chart of percentage of total summed value in each block for the given field.
+        """
+        import matplotlib.pyplot as plt
+        values = []
+        labels = []
+        if isinstance(self.dataset, pv.MultiBlock):
+            blocks = [self.dataset[i] for i in (block_indices if block_indices is not None else range(len(self.dataset))) if self.dataset[i] is not None]
+        else:
+            blocks = [self.mesh]
+        for idx, block in enumerate(blocks):
+            if field in block.point_data:
+                val = np.sum(block.point_data[field])
+                values.append(val)
+                labels.append(f'Block {idx}')
+        total = np.sum(values)
+        percentages = [100 * v / total if total > 0 else 0 for v in values]
+        plt.figure()
+        plt.bar(labels, percentages)
+        plt.ylabel(f'Percentage of total {field} (%)')
+        plt.title(f'Block-wise Percentage of Total {field}')
+        fname = save_path or f'block_percentage_bar_{field}.png'
+        plt.savefig(fname)
+        plt.close()
+
+    def plot_height_percentage_bar(self, field, axis='y', num_slices=100, save_path=None):
+        import matplotlib.pyplot as plt
+        """
+        Plot bar chart of percentage of total summed value per height slice for the given field.
+        """
+        import matplotlib.pyplot as plt
+        df = self.slice_and_average(axis=axis, num_slices=num_slices)
+        if field not in df.columns:
+            print(f"Field '{field}' not found in slice averages.")
+            return
+        values = df[field].fillna(0).values
+        mids = df[f'{axis}_mid'].values
+        total = np.sum(values)
+        percentages = [100 * v / total if total > 0 else 0 for v in values]
+        plt.figure()
+        plt.bar(mids, percentages, width=(mids[1]-mids[0]) if len(mids)>1 else 1)
+        plt.xlabel(f'{axis} (mid of slice)')
+        plt.ylabel(f'Percentage of total {field} (%)')
+        plt.title(f'Height-wise Percentage of Total {field}')
+        fname = save_path or f'height_percentage_bar_{field}_{axis}.png'
+        plt.savefig(fname)
+        plt.close()
+
+    def plot_slice_contour(self, field, axis='y', value=None, n_contours=10, save_path=None, data_type='cell'):
+        """
+        Plot contour on a 2D slice at a given axis=value.
+        """
+        plotter = pv.Plotter()
+        if value is None:
+            value = (self.mesh.bounds[{ 'x':0, 'y':2, 'z':4 }[axis]] + self.mesh.bounds[{ 'x':1, 'y':3, 'z':5 }[axis]]) / 2
+        slice = self.mesh.slice(normal=axis, origin={ 'x':(value,0,0), 'y':(0,value,0), 'z':(0,0,value) }[axis])
+        data_dict = slice.cell_data if data_type == 'cell' else slice.point_data
+        if field in data_dict:
+            contours = slice.contour(n_contours=n_contours, scalars=field)
+            plotter.add_mesh(contours, scalars=field, cmap='viridis')
+        else:
+            plotter.add_mesh(slice)
+        if save_path:
+            plotter.show(screenshot=save_path)
+        else:
+            plotter.show()
+
+    def plot_isosurface(self, field, value, save_path=None, data_type='cell'):
+        """
+        Plot iso-surface for a given field value.
+        """
+        plotter = pv.Plotter()
+        data_dict = self.mesh.cell_data if data_type == 'cell' else self.mesh.point_data
+        if field in data_dict:
+            iso = self.mesh.contour(isosurfaces=[value], scalars=field)
+            plotter.add_mesh(iso, scalars=field, cmap='viridis')
+            if save_path:
+                plotter.show(screenshot=save_path)
+            else:
+                plotter.show()
+        else:
+            print(f"Field '{field}' not found.")
+
+    def plot_animated_contour(self, field, axis='y', num_slices=20, n_contours=10):
+        """
+        Animate contour plots across slices along an axis.
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.animation as animation
+        bounds = self.mesh.bounds
+        axis_index = {'x': 0, 'y': 2, 'z': 4}[axis]
+        min_val = bounds[axis_index]
+        max_val = bounds[axis_index + 1]
+        y_range = max_val - min_val
+        slice_thickness = y_range / num_slices
+        fig, ax = plt.subplots()
+        ims = []
+        for i in range(num_slices):
+            value = min_val + i * slice_thickness
+            slice = self.mesh.slice(normal=axis, origin={ 'x':(value,0,0), 'y':(0,value,0), 'z':(0,0,value) }[axis])
+            if field in slice.point_data:
+                data = slice.point_data[field]
+                im = ax.imshow(data.reshape(-1,1), aspect='auto', cmap='viridis', animated=True)
+                ims.append([im])
+        ani = animation.ArtistAnimation(fig, ims, interval=200, blit=True)
+        plt.show()
+
+    def plot_multi_field_contour(self, fields, n_contours=10, save_path=None, data_type='cell'):
+        """
+        Overlay contours for multiple fields.
+        """
+        plotter = pv.Plotter()
+        data_dict = self.mesh.cell_data if data_type == 'cell' else self.mesh.point_data
+        for field in fields:
+            if field in data_dict:
+                contours = self.mesh.contour(n_contours=n_contours, scalars=field)
+                plotter.add_mesh(contours, scalars=field, cmap='viridis')
+        if save_path:
+            plotter.show(screenshot=save_path)
+        else:
+            plotter.show()
+
+    def plot_profile_along_line(self, field, pointa, pointb, n_points=100, save_path=None, data_type='cell'):
+        """
+        Extract and plot field profile along a line from pointa to pointb.
+        """
+        import matplotlib.pyplot as plt
+        line = pv.Line(pointa, pointb, resolution=n_points)
+        sampled = self.mesh.sample_over_line(pointa, pointb, n_points)
+        data_dict = sampled.cell_data if data_type == 'cell' else sampled.point_data
+        if field in data_dict:
+            plt.plot(np.linspace(0, 1, n_points), data_dict[field])
+            plt.xlabel('Normalized Distance')
+            plt.ylabel(field)
+            plt.title(f'{field} Profile Along Line')
+            fname = save_path or f'profile_line_{field}.png'
+            plt.savefig(fname)
+            plt.close()
+
+    def plot_scatter(self, field_x, field_y, save_path=None, data_type='cell'):
+        """
+        Scatter plot of field_y vs field_x.
+        """
+        import matplotlib.pyplot as plt
+        data_dict = self.mesh.cell_data if data_type == 'cell' else self.mesh.point_data
+        if field_x in data_dict and field_y in data_dict:
+            plt.scatter(data_dict[field_x], data_dict[field_y])
+            plt.xlabel(field_x)
+            plt.ylabel(field_y)
+            plt.title(f'{field_y} vs {field_x}')
+            fname = save_path or f'scatter_{field_y}_vs_{field_x}.png'
+            plt.savefig(fname)
+            plt.close()
+
+    def plot_error_band(self, field, x_axis, error_field, save_path=None, data_type='cell'):
+        """
+        Line plot with error/uncertainty band.
+        """
+        import matplotlib.pyplot as plt
+        data_dict = self.mesh.cell_data if data_type == 'cell' else self.mesh.point_data
+        if field in data_dict and x_axis in data_dict and error_field in data_dict:
+            y = data_dict[field]
+            x = data_dict[x_axis]
+            err = data_dict[error_field]
+            plt.plot(x, y, label=field)
+            plt.fill_between(x, y-err, y+err, alpha=0.3, label='Error Band')
+            plt.xlabel(x_axis)
+            plt.ylabel(field)
+            plt.title(f'{field} with Error Band')
+            plt.legend()
+            fname = save_path or f'error_band_{field}_vs_{x_axis}.png'
+            plt.savefig(fname)
+            plt.close()
+
+    def plot_time_series(self, field, time_values, save_path=None, data_type='cell'):
+        """
+        Plot time series for a field (if time-dependent data available).
+        time_values: array-like of time points
+        """
+        import matplotlib.pyplot as plt
+        # This assumes self.mesh.point_data[field] is 2D: (time, value)
+        data_dict = self.mesh.cell_data if data_type == 'cell' else self.mesh.point_data
+        data = data_dict[field]
+        if data.ndim == 2 and len(time_values) == data.shape[0]:
+            for i in range(data.shape[1]):
+                plt.plot(time_values, data[:,i], label=f'Point {i}')
+            plt.xlabel('Time')
+            plt.ylabel(field)
+            plt.title(f'Time Series of {field}')
+            plt.legend()
+            fname = save_path or f'timeseries_{field}.png'
+            plt.savefig(fname)
+            plt.close()
+
+    def plot_vector_field(self, field_u, field_v, field_w=None, scale=1.0):
+        """
+        Quiver/arrow plot for vector field (2D or 3D).
+        """
+        import matplotlib.pyplot as plt
+        u = self.mesh.point_data[field_u]
+        v = self.mesh.point_data[field_v]
+        if field_w:
+            w = self.mesh.point_data[field_w]
+            # 3D quiver plot (matplotlib is limited, so use pyvista)
+            arrows = pv.Arrow(start=(0,0,0), direction=(u.mean(), v.mean(), w.mean()), scale=scale)
+            plotter = pv.Plotter()
+            plotter.add_mesh(arrows)
+            plotter.show()
+        else:
+            x = self.mesh.points[:,0]
+            y = self.mesh.points[:,1]
+            plt.quiver(x, y, u, v, scale=scale)
+            plt.xlabel('X')
+            plt.ylabel('Y')
+            plt.title('Vector Field')
+            plt.show()
+
+    def plot_streamlines(self, field_u, field_v, field_w=None, n_points=100):
+        """
+        Streamline plot for vector field.
+        """
+        plotter = pv.Plotter()
+        if field_w:
+            vectors = np.column_stack((self.mesh.point_data[field_u], self.mesh.point_data[field_v], self.mesh.point_data[field_w]))
+        else:
+            vectors = np.column_stack((self.mesh.point_data[field_u], self.mesh.point_data[field_v], np.zeros_like(self.mesh.point_data[field_u])))
+        self.mesh['vectors'] = vectors
+        streamlines = self.mesh.streamlines(vectors='vectors', n_points=n_points)
+        plotter.add_mesh(streamlines)
+        plotter.show()
+
+    def plot_surface(self, field, axis1='x', axis2='y', grid_size=100, save_path=None):
+        """
+        3D surface plot of field values over a plane.
+        """
+        import matplotlib.pyplot as plt
+        x = self.mesh.points[:, {'x':0, 'y':1, 'z':2}[axis1]]
+        y = self.mesh.points[:, {'x':0, 'y':1, 'z':2}[axis2]]
+        z = self.mesh.point_data[field]
+        from mpl_toolkits.mplot3d import Axes3D
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        ax.plot_trisurf(x, y, z, cmap='viridis')
+        ax.set_xlabel(axis1)
+        ax.set_ylabel(axis2)
+        ax.set_zlabel(field)
+        plt.title(f'Surface Plot of {field}')
+        fname = save_path or f'surface_{field}_{axis1}_{axis2}.png'
+        plt.savefig(fname)
+        plt.close()
+
+    def plot_histogram(self, field, bins=30, save_path=None, data_type='cell'):
+        """
+        Histogram of field values.
+        """
+        import matplotlib.pyplot as plt
+        data_dict = self.mesh.cell_data if data_type == 'cell' else self.mesh.point_data
+        data = data_dict[field]
+        plt.hist(data, bins=bins, color='skyblue', edgecolor='black')
+        plt.xlabel(field)
+        plt.ylabel('Count')
+        plt.title(f'Histogram of {field}')
+        fname = save_path or f'histogram_{field}.png'
+        plt.savefig(fname)
+        plt.close()
+
+    def plot_heatmap(self, field, axis1='x', axis2='y', grid_size=100, save_path=None, data_type='cell'):
+        """
+        2D heatmap of field values on a plane.
+        """
+        import matplotlib.pyplot as plt
+        x = self.mesh.points[:, {'x':0, 'y':1, 'z':2}[axis1]]
+        y = self.mesh.points[:, {'x':0, 'y':1, 'z':2}[axis2]]
+        data_dict = self.mesh.cell_data if data_type == 'cell' else self.mesh.point_data
+        z = data_dict[field]
+        heatmap, xedges, yedges = np.histogram2d(x, y, bins=grid_size, weights=z)
+        plt.imshow(heatmap.T, origin='lower', aspect='auto', cmap='viridis')
+        plt.xlabel(axis1)
+        plt.ylabel(axis2)
+        plt.title(f'Heatmap of {field}')
+        fname = save_path or f'heatmap_{field}_{axis1}_{axis2}.png'
+        plt.savefig(fname)
+        plt.close()
+        
+
+# Example usage:
+# processor = CFDPostProcessor('inner_surface.vtm')
+# df = processor.slice_and_average(axis='y', num_slices=100)
+# processor.save_averages(df, 'inner_surface_avg.csv')
